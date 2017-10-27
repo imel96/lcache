@@ -19,7 +19,7 @@ class Redis extends L2
     private $autoserialize;
     const KEY_DELIMITER = ':';
 
-    public function __construct(PHPRedis $redis, $prefix = '', $default_ttl = 300)
+    public function __construct(PHPRedis $redis, $prefix = '', $default_ttl = 0xffffffff)
     {
         $this->redis = $redis;
         $this->autoserialize = $redis->getOption(PHPRedis::OPT_SERIALIZER) != PHPRedis::SERIALIZER_NONE;
@@ -141,18 +141,14 @@ class Redis extends L2
 
     protected function entryFromHashValues($event_id, $address, $pool, $value, $tags, $created, $expire, $miss_on_delete)
     {
-        if ("" == $value && $this->autoserialize) {
-            $unserialized_value = null;
-        } else {
-            $unserialized_value = $this->autoserialize ? $value : @unserialize($value);
-        }
+        $unserialized_value = !$this->autoserialize && $miss_on_delete ? @unserialize($value) : $value;
         $unserialized_tags = is_array($tags) ? $tags : @unserialize($tags);
         $unserialized_address = new Address();
         $unserialized_address->unserialize($address);
 
         if (!$this->autoserialize && $miss_on_delete) {
             // If last event was a deletion, miss
-            if (is_null($unserialized_value) && serialize(null) == $value) {
+            if (is_null($unserialized_value)) {
                 return null;
             }
             // If unserialization failed, raise an exception.
@@ -215,34 +211,38 @@ class Redis extends L2
             5 => $this->created_time,
             6 => $expiration,
         ];
+        // 1st stores using address as key, 2nd stores using event_id
         return $this->redis->eval("
-          local event_id = redis.call('incr', KEYS[2])
-          redis.call('hmset', KEYS[1],
-            'event_id', event_id,
-            'address', ARGV[1],
-            'pool', ARGV[2],
-            'value', ARGV[3],
-            'tags', ARGV[4],
-            'created', ARGV[5],
-            'expire', ARGV[6]
-          )
-          redis.call('expireat', KEYS[1], ARGV[6])
-          for tag = 7, #ARGV do
-            redis.call('sadd', KEYS[3] .. ARGV[tag], ARGV[1])
-          end
-          redis.call('zadd', KEYS[4], event_id, KEYS[1])
-          return event_id
+            local event_id = redis.call('incr', KEYS[2])
+            redis.call('hmset', KEYS[1],
+                'pool', ARGV[2],
+                'value', ARGV[3],
+                'tags', ARGV[4],
+                'created', ARGV[5],
+                'expire', ARGV[6]
+              )
+            redis.call('expireat', KEYS[1], ARGV[6])
+            for tag = 7, #ARGV do
+                redis.call('sadd', KEYS[3] .. ARGV[tag], ARGV[1])
+            end
+            redis.call('zadd', KEYS[4], event_id, event_id)
+            redis.call('hmset', event_id,
+                'address', ARGV[1],
+                'pool', ARGV[2],
+                'value', ARGV[3],
+                'tags', ARGV[4],
+                'created', ARGV[5],
+                'expire', ARGV[6]
+              )
+            redis.call('expireat', event_id, ARGV[6])
+
+            return event_id
         ", array_merge($keys, $args, $tags), count($keys));
+return $ret;
     }
 
     public function set($pool, Address $address, $value = null, $expiration = null, array $tags = [], $value_is_serialized = false)
     {
-        // Support pre-serialized values for testing purposes.
-        $original_value = $value;
-        if (!$value_is_serialized && !$this->autoserialize) {
-            $value = is_null($value) ? serialize(null) : serialize($value);
-        }
-
         // Handle bin and larger deletions immediately. Queue individual key deletions for shutdown.
         // Clearing an entire bin does not remove the items in that bin
         // from the tags or ids lookup keys which may cause artificial misses later.
@@ -256,51 +256,33 @@ class Redis extends L2
                 ",
                 [$address->isEntireCache() ? $this->keyConstruct('event', '*') : $this->keyFromAddress($address) . '*']
             );
-        } else if (is_null($original_value)) {
+        } else if (is_null($value)) {
             $this->queueDeletion($address);
         }
-
+        // Support pre-serialized values for testing purposes.
+        if (!$value_is_serialized && !$this->autoserialize) {
+            $value = serialize($value);
+        }
         return $this->redisSet($address, $pool, $value, $tags, $expiration ?? $this->created_time + $this->default_ttl);
     }
 
-    public function applyEvents(L1 $l1)
-    {
-        $last_applied_event_id = $l1->getLastAppliedEventID();
+    protected function getCurrentEventId() {
+        return intval($this->redis->get($this->keyConstruct('event')));
+    }
 
-        // If the L1 cache is empty, bump the last applied ID to the current high-water mark.
-        if (is_null($last_applied_event_id)) {
-            $l1->setLastAppliedEventID(intval($this->redis->get($this->keyConstruct('event'))));
-            return null;
-        }
-
-        $keys = $this->redis->zRangeByScore($this->keyConstruct('event', 'ids'), $last_applied_event_id, '+inf');
+    protected function getLastEvents($last_applied_event_id, $pool) {
+        $keys = $this->redis->zRange($this->keyConstruct('event', 'ids'), $last_applied_event_id, -1);
         $transaction = $this->redis->multi(PHPRedis::PIPELINE);
+        $events = [];
+
         foreach ($keys as $key) {
             $transaction = $transaction->hGetAll($key);
         }
-
-        $bad_pool = $l1->getPool();
-        $applied = 0;
         foreach ($transaction->exec() as $values) {
-            if (!is_array($values) || empty($values) || $values['pool'] == $bad_pool) {
-                continue;
+            if (is_array($values) && !empty($values) && $values['pool'] != $pool) {
+                $events[] = $this->entryFromHash($values, false);
             }
-
-            $event = $this->entryFromHash($values, false);
-            if (is_null($event->value)) {
-                $address = new Address();
-                $address->unserialize($values->address);
-                $l1->delete($event->event_id, $address);
-            } else {
-                $l1->setWithExpiration($event->event_id, $event->getAddress(), $event->value, $event->created, $event->expiration);
-            }
-            $last_applied_event_id = $event->event_id;
-            $applied++;
         }
-
-        // Just in case there were skipped events, set the high water mark.
-        $l1->setLastAppliedEventID($last_applied_event_id);
-
-        return $applied;
+        return $events;
     }
 }

@@ -27,10 +27,8 @@ class StaticL2 extends L2
     public function countGarbage()
     {
         $garbage = 0;
-        $current = time();
-
         foreach ($this->events as $event_id => $entry) {
-            if ($entry->expiration < $current) {
+            if ($entry->expiration < $this->created_time) {
                 $garbage++;
             }
         }
@@ -40,10 +38,8 @@ class StaticL2 extends L2
     public function collectGarbage($item_limit = null)
     {
         $deleted = 0;
-        $current = time();
-
         foreach ($this->events as $event_id => $entry) {
-            if ($entry->expiration < $current) {
+            if ($entry->expiration < $this->created_time) {
                 unset($this->events[$event_id]);
                 $deleted++;
             }
@@ -63,12 +59,10 @@ class StaticL2 extends L2
             }
         );
         $last_matching_entry = null;
-        $current = time();
-
         foreach ($events as $entry) {
             if ($entry->getAddress()->isEntireCache() || $entry->getAddress()->isEntireBin()) {
                 $last_matching_entry = null;
-            } elseif (!is_null($entry->expiration) && $entry->expiration <= $current) {
+            } elseif (!is_null($entry->expiration) && $entry->expiration < $this->created_time) {
                 $last_matching_entry = null;
             } else {
                 $last_matching_entry = clone $entry;
@@ -102,8 +96,16 @@ class StaticL2 extends L2
         if (!$value_is_serialized) {
             $value = serialize($value);
         }
-        $this->events[$this->current_event_id] = new Entry($this->current_event_id, $pool, $address, $value, time(), $expiration, $tags);
+        $this->events[$this->current_event_id] = new Entry($this->current_event_id, $pool, $address, $value, $this->created_time, $expiration, $tags);
 
+        // Delete redundant events to match Database implementation
+        if ($address->isEntireBin() || $address->isEntireCache()) {
+            foreach ($this->events as $event_id => $event) {
+                if ($event->getAddress()->isMatch($address) && $event_id < $this->current_event_id) {
+                    unset($this->events[$event_id]);
+                }
+            }
+        }
         // Clear existing tags linked to the item. This is much more
         // efficient with database-style indexes.
         foreach ($this->tags as $tag => $addresses) {
@@ -152,41 +154,20 @@ class StaticL2 extends L2
         return $this->current_event_id;
     }
 
-    public function applyEvents(L1 $l1)
-    {
-        $last_applied_event_id = $l1->getLastAppliedEventID();
+    protected function getCurrentEventId() {
+        return $this->current_event_id;
+    }
 
-        // If the L1 cache is empty, bump the last applied ID
-        // to the current high-water mark.
-        if (is_null($last_applied_event_id)) {
-            $l1->setLastAppliedEventID($this->current_event_id);
-            return null;
-        }
+    protected function getLastEvents($last_applied_event_id, $pool) {
+        $events = [];
 
-        $applied = 0;
         foreach ($this->events as $event_id => $event) {
             // Skip events that are too old or were created by the local L1.
-            if ($event_id <= $last_applied_event_id || $event->pool === $l1->getPool()) {
-                continue;
+            if ($event_id > $last_applied_event_id && $event->pool !== $pool) {
+                $events[] = $event;
             }
-
-            if (is_null($event->value)) {
-                $l1->delete($event->event_id, $event->getAddress());
-            } else {
-                $unserialized_value = @unserialize($event->value);
-                if (false === $unserialized_value && serialize(false) !== $event->value) {
-                    // Delete the L1 entry, if any, when we fail to unserialize.
-                    $l1->delete($event->event_id, $event->getAddress());
-                } else {
-                    $l1->setWithExpiration($event->event_id, $event->getAddress(), $unserialized_value, $event->created, $event->expiration);
-                }
-            }
-            $applied++;
         }
-
-        // Just in case there were skipped events, set the high water mark.
-        $l1->setLastAppliedEventID($this->current_event_id);
-        return $applied;
+        return $events;
     }
 
     public function getHits()

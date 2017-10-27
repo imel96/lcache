@@ -73,7 +73,9 @@ class Database extends L2
     public function countGarbage()
     {
         try {
-            $sth = $this->dbh->query('SELECT COUNT(*) garbage FROM ' . $this->prefixTable('lcache_events') . ' WHERE "expiration" < ' . time());
+            $sth = $this->dbh->prepare('SELECT COUNT(*) garbage FROM ' . $this->prefixTable('lcache_events') . ' WHERE "expiration" < :now');
+            $sth->bindValue(':now', $this->created_time, \PDO::PARAM_INT);
+            $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to count garbage', $e);
             return null;
@@ -85,7 +87,7 @@ class Database extends L2
 
     public function collectGarbage($item_limit = null)
     {
-        $sql = 'DELETE FROM ' . $this->prefixTable('lcache_events') . ' WHERE "expiration" < ' . time();
+        $sql = 'DELETE FROM ' . $this->prefixTable('lcache_events') . ' WHERE "expiration" < :now';
         // This is not supported by standard SQLite.
         // @codeCoverageIgnoreStart
         if (!is_null($item_limit)) {
@@ -94,6 +96,7 @@ class Database extends L2
         // @codeCoverageIgnoreEnd
         try {
             $sth = $this->dbh->prepare($sql);
+            $sth->bindValue(':now', $this->created_time, \PDO::PARAM_INT);
             // This is not supported by standard SQLite.
             // @codeCoverageIgnoreStart
             if (!is_null($item_limit)) {
@@ -152,19 +155,19 @@ class Database extends L2
     // Returns an LCache\Entry
     public function getEntry(Address $address)
     {
-        $current = time();
-
         try {
             $sth = $this->dbh->prepare('SELECT e.event_id, "pool", "address", "value", "created", "expiration", GROUP_CONCAT(tag, \',\') AS tags
               FROM ' . $this->prefixTable('lcache_events') .' e LEFT JOIN ' . $this->prefixTable('lcache_tags') . ' t ON t.event_id = e.event_id
-              WHERE "address" = :address AND ("expiration" >= ' . $current . ' OR "expiration" IS NULL)
+              WHERE "address" = :address AND ("expiration" >= :now OR "expiration" IS NULL)
               GROUP BY e.event_id ORDER BY e.event_id DESC LIMIT 1');
             $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
+            $sth->bindValue(':now', $this->created_time, \PDO::PARAM_INT);
             $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to search database for cache item', $e);
             return null;
         }
+        //$last_matching_entry = $sth->fetchObject('LCacheEntry');
         $last_matching_entry = $sth->fetchObject();
 
         if (false === $last_matching_entry) {
@@ -172,8 +175,8 @@ class Database extends L2
             return null;
         }
 
-        // If last event was a deletion or ttl == 0, miss.
-        if (is_null($last_matching_entry->value) || $last_matching_entry->expiration == $current) {
+        // If last event was a deletion, miss.
+        if (is_null($last_matching_entry->value)) {
             $this->misses++;
             return null;
         }
@@ -213,18 +216,17 @@ class Database extends L2
 
     public function exists(Address $address)
     {
-        $current = time();
-
         try {
-            $sth = $this->dbh->prepare('SELECT "event_id", ("value" IS NOT NULL) AS value_not_null, "value", "expiration" FROM ' . $this->prefixTable('lcache_events') .' WHERE "address" = :address AND ("expiration" >= ' . $current . ' OR "expiration" IS NULL) ORDER BY "event_id" DESC LIMIT 1');
+            $sth = $this->dbh->prepare('SELECT "event_id", ("value" IS NOT NULL) AS value_not_null, "value" FROM ' . $this->prefixTable('lcache_events') .' WHERE "address" = :address AND ("expiration" >= :now OR "expiration" IS NULL) ORDER BY "event_id" DESC LIMIT 1');
             $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
+            $sth->bindValue(':now', $this->created_time, \PDO::PARAM_INT);
             $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to search database for cache item existence', $e);
             return null;
         }
         $result = $sth->fetchObject();
-        return ($result !== false && $result->value_not_null && $result->expiration != $current);
+        return ($result !== false && $result->value_not_null);
     }
 
     /**
@@ -261,11 +263,12 @@ class Database extends L2
         }
 
         try {
-            $sth = $this->dbh->prepare('INSERT INTO ' . $this->prefixTable('lcache_events') . ' ("pool", "address", "value", "created", "expiration") VALUES (:pool, :address, :value, ' . time() . ', :expiration)');
+            $sth = $this->dbh->prepare('INSERT INTO ' . $this->prefixTable('lcache_events') . ' ("pool", "address", "value", "created", "expiration") VALUES (:pool, :address, :value, :now, :expiration)');
             $sth->bindValue(':pool', $pool, \PDO::PARAM_STR);
             $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
             $sth->bindValue(':value', $value, \PDO::PARAM_LOB);
             $sth->bindValue(':expiration', $expiration, \PDO::PARAM_INT);
+            $sth->bindValue(':now', $this->created_time, \PDO::PARAM_INT);
             $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to store cache event', $e);
@@ -361,66 +364,35 @@ class Database extends L2
         return $last_applied_event_id;
     }
 
-    public function applyEvents(L1 $l1)
-    {
-        $last_applied_event_id = $l1->getLastAppliedEventID();
-
-        // If the L1 cache is empty, bump the last applied ID
-        // to the current high-water mark.
-        if (is_null($last_applied_event_id)) {
-            try {
-                $sth = $this->dbh->prepare('SELECT "event_id" FROM ' . $this->prefixTable('lcache_events') . ' ORDER BY "event_id" DESC LIMIT 1');
-                $sth->execute();
-            } catch (\PDOException $e) {
-                $this->logSchemaIssueOrRethrow('Failed to initialize local event application status', $e);
-                return null;
-            }
-            $last_event = $sth->fetchObject();
-            if (false === $last_event) {
-                $l1->setLastAppliedEventID(0);
-            } else {
-                $l1->setLastAppliedEventID($last_event->event_id);
-            }
-            return null;
+    protected function getCurrentEventId() {
+        try {
+            $sth = $this->dbh->prepare('SELECT "event_id" FROM ' . $this->prefixTable('lcache_events') . ' ORDER BY "event_id" DESC LIMIT 1');
+            $sth->execute();
+        } catch (\PDOException $e) {
+            $this->logSchemaIssueOrRethrow('Failed to initialize local event application status', $e);
+            return 0;
         }
+        $last_event = $sth->fetchObject();
+        return $last_event === false ? 0 : $last_event->event_id;
+    }
 
-        $applied = 0;
+    protected function getLastEvents($last_applied_event_id, $pool) {
+        $events = [];
         try {
             $sth = $this->dbh->prepare('SELECT "event_id", "pool", "address", "value", "created", "expiration" FROM ' . $this->prefixTable('lcache_events') . ' WHERE "event_id" > :last_applied_event_id AND "pool" <> :exclude_pool ORDER BY event_id');
             $sth->bindValue(':last_applied_event_id', $last_applied_event_id, \PDO::PARAM_INT);
-            $sth->bindValue(':exclude_pool', $l1->getPool(), \PDO::PARAM_STR);
+            $sth->bindValue(':exclude_pool', $pool, \PDO::PARAM_STR);
             $sth->execute();
+
+            while ($event = $sth->fetchObject()) {
+                $address = new Address();
+                $address->unserialize($event->address);
+                $events[] = new Entry($event->event_id, $event->pool, $address, $event->value, $event->created, $event->expiration);
+            }
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to fetch events', $e);
-            return null;
         }
-
-        //while ($event = $sth->fetchObject('LCacheEntry')) {
-        while ($event = $sth->fetchObject()) {
-            $address = new Address();
-            $address->unserialize($event->address);
-            if (is_null($event->value)) {
-                $l1->delete($event->event_id, $address);
-            } else {
-                $unserialized_value = @unserialize($event->value);
-                if (false === $unserialized_value && serialize(false) !== $event->value) {
-                    // Delete the L1 entry, if any, when we fail to unserialize.
-                    $l1->delete($event->event_id, $address);
-                } else {
-                    $event->value = $unserialized_value;
-                    $address = new Address();
-                    $address->unserialize($event->address);
-                    $l1->setWithExpiration($event->event_id, $address, $event->value, $event->created, $event->expiration);
-                }
-            }
-            $last_applied_event_id = $event->event_id;
-            $applied++;
-        }
-
-        // Just in case there were skipped events, set the high water mark.
-        $l1->setLastAppliedEventID($last_applied_event_id);
-
-        return $applied;
+        return $events;
     }
 
     public function getHits()
