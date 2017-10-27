@@ -68,7 +68,7 @@ class StaticL2 extends L2
         foreach ($events as $entry) {
             if ($entry->getAddress()->isEntireCache() || $entry->getAddress()->isEntireBin()) {
                 $last_matching_entry = null;
-            } elseif (!is_null($entry->expiration) && $entry->expiration < $current) {
+            } elseif (!is_null($entry->expiration) && $entry->expiration <= $current) {
                 $last_matching_entry = null;
             } else {
                 $last_matching_entry = clone $entry;
