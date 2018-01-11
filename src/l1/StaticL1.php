@@ -2,13 +2,13 @@
 
 namespace LCache\l1;
 
-use LCache\Address;
 use LCache\Entry;
 use LCache\state\StateL1Interface;
 
 class StaticL1 extends L1
 {
     private static $cacheData = [];
+    public static $cacheLineBusy = [];
 
     protected $key_overhead;
 
@@ -27,18 +27,18 @@ class StaticL1 extends L1
         $this->storage = &self::$cacheData[$this->pool];
     }
 
-    public function getKeyOverhead(Address $address)
+    public function getKeyOverhead(string $address)
     {
-        $local_key = $address->serialize();
+        $local_key = $address;
         if (array_key_exists($local_key, $this->key_overhead)) {
             return $this->key_overhead[$local_key];
         }
         return 0;
     }
 
-    public function setWithExpiration($event_id, Address $address, $value, $created, $expiration = null)
+    public function setWithExpiration($event_id, string $address, $value, $created, $expiration = null)
     {
-        $local_key = $address->serialize();
+        $local_key = $address;
 
         // If not setting a negative cache entry, increment the key's overhead.
         if (!is_null($value)) {
@@ -58,30 +58,28 @@ class StaticL1 extends L1
         return true;
     }
 
-    public function isNegativeCache(Address $address)
+    public function isNegativeCache(string $address): bool
     {
-        $local_key = $address->serialize();
-        return (isset($this->storage[$local_key]) && is_null($this->storage[$local_key]->value));
+        return (isset($this->storage[$address]) && is_null($this->storage[$address]->value));
     }
 
-    public function getEntry(Address $address)
+    public function getEntry(string $address)
     {
-        $local_key = $address->serialize();
-
         // Decrement the key's overhead.
-        if (isset($this->key_overhead[$local_key])) {
-            $this->key_overhead[$local_key]--;
+        if (isset($this->key_overhead[$address])) {
+            $this->key_overhead[$address]--;
         } else {
-            $this->key_overhead[$local_key] = -1;
+            $this->key_overhead[$address] = -1;
         }
 
-        if (!array_key_exists($local_key, $this->storage)) {
+        if (!array_key_exists($address, $this->storage)) {
             $this->recordMiss();
             return null;
         }
-        $entry = $this->storage[$local_key];
+        $entry = $this->storage[$address];
+
         if ($entry->getTTL() === 0) {
-            unset($this->storage[$local_key]);
+            unset($this->storage[$address]);
             $this->recordMiss();
             return null;
         }
@@ -91,24 +89,29 @@ class StaticL1 extends L1
         return $entry;
     }
 
-    public function delete($event_id, Address $address)
+    public function delete($event_id, string $address): bool
     {
-        $local_key = $address->serialize();
-        if ($address->isEntireCache()) {
-            $this->storage = array();
+        if ($address == '*') {
+            $this->storage = [];
             $this->state->clear();
-            return true;
-        } elseif ($address->isEntireBin()) {
-            foreach ($this->storage as $index => $value) {
-                if (strpos($index, $local_key) === 0) {
-                    unset($this->storage[$index]);
-                }
-            }
-            return true;
+
+        } else {
+            $this->setLastAppliedEventID($event_id);
+            // @TODO: Consider adding "race" protection here, like for set.
+            unset($this->storage[$address]);
         }
-        $this->setLastAppliedEventID($event_id);
-        // @TODO: Consider adding "race" protection here, like for set.
-        unset($this->storage[$local_key]);
         return true;
+    }
+
+    public function setBusy(string $address, bool $status) {
+        self::$cacheLineBusy[$address] = $status;
+    }
+
+    public function isBusy(string $address): bool {
+
+        if (!isset(self::$cacheLineBusy[$address])) {
+            self::$cacheLineBusy[$address] = false;
+        }
+        return self::$cacheLineBusy[$address];
     }
 }

@@ -4,15 +4,17 @@ namespace LCache;
 
 final class Entry
 {
-    public $event_id;
-    public $pool;
     protected $address;
-    public $value;
+    public $busy;
     public $created;
+    public $event_id;
     public $expiration;
-    public $tags;
+    public $pool;
+    public $rts;
+    public $value;
+    public $wts;
 
-    public function __construct($event_id, $pool, Address $address, $value, $created, $expiration = null, array $tags = [])
+    public function __construct($event_id, $pool, string $address, $value, $created, $expiration = null)
     {
         $this->event_id = $event_id;
         $this->pool = $pool;
@@ -20,14 +22,12 @@ final class Entry
         $this->value = $value;
         $this->created = $created;
         $this->expiration = $expiration;
-        $this->tags = $tags;
     }
 
     /**
      * Return the Address for this entry.
-     * @return Address
      */
-    public function getAddress()
+    public function getAddress(): string
     {
         return $this->address;
     }

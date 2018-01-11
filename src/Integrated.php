@@ -10,6 +10,7 @@ final class Integrated
     protected $l1;
     protected $l2;
     protected $overhead_threshold;
+    protected $l1_cacheline;
 
     /**
      * @param L1 $l1
@@ -23,7 +24,7 @@ final class Integrated
         $this->overhead_threshold = $overhead_threshold;
     }
 
-    public function set(Address $address, $value, $ttl_or_expiration = null, array $tags = [])
+    public function set(string $address, $value, $ttl_or_expiration = null)
     {
         $expiration = null;
         $current = time();
@@ -61,30 +62,35 @@ final class Integrated
             }
         }
 
-        $event_id = $this->l2->set($this->l1->getPool(), $address, $value, $expiration, $tags);
+        $event_id = $this->l2->set($this->l1->getPool(), $address, $value, $expiration);
         if (!is_null($event_id)) {
             $this->l1->set($event_id, $address, $value, $expiration);
         }
         return $event_id;
     }
 
-    protected function getEntryOrTombstone(Address $address)
+    protected function getEntryOrTombstone(string $address)
     {
         $entry = $this->l1->getEntry($address);
         if (!is_null($entry)) {
+            // LoadHit || StoreHit
             return $entry;
         }
+        // L1Miss
+        $this->l1->setBusy($address, true);
         $entry = $this->l2->getEntry($address);
         if (is_null($entry)) {
             // On an L2 miss, construct a negative cache entry that will be
             // overwritten on any update.
             $entry = new Entry(0, $this->l1->getPool(), $address, null, time(), null);
         }
+        // L2Resp
+        $this->l1->setBusy($address, false);
         $this->l1->setWithExpiration($entry->event_id, $address, $entry->value, $entry->created, $entry->expiration);
         return $entry;
     }
 
-    public function getEntry(Address $address, $return_tombstone = false)
+    public function getEntry(string $address, $return_tombstone = false)
     {
         $entry = $this->getEntryOrTombstone($address);
         if (!is_null($entry) && (!is_null($entry->value) || $return_tombstone)) {
@@ -93,7 +99,7 @@ final class Integrated
         return null;
     }
 
-    public function get(Address $address)
+    public function get(string $address)
     {
         $entry = $this->getEntry($address);
         if (is_null($entry)) {
@@ -102,7 +108,7 @@ final class Integrated
         return $entry->value;
     }
 
-    public function exists(Address $address)
+    public function exists(string $address)
     {
         $exists = $this->l1->exists($address);
         if ($exists) {
@@ -111,18 +117,13 @@ final class Integrated
         return $this->l2->exists($address);
     }
 
-    public function delete(Address $address)
+    public function delete(string $address)
     {
         $event_id = $this->l2->delete($this->l1->getPool(), $address);
+
         if (!is_null($event_id)) {
             $this->l1->delete($event_id, $address);
         }
-        return $event_id;
-    }
-
-    public function deleteTag($tag)
-    {
-        $event_id = $this->l2->deleteTag($this->l1, $tag);
         return $event_id;
     }
 

@@ -2,7 +2,6 @@
 
 namespace LCache\l2;
 
-use LCache\Address;
 use LCache\Entry;
 use LCache\UnserializationException;
 use LCache\l1\L1;
@@ -108,11 +107,9 @@ class Database extends L2
         return false;
     }
 
-    protected function queueDeletion(Address $address)
+    protected function queueDeletion(string $address)
     {
-        assert(!$address->isEntireBin());
-        $pattern = $address->serialize();
-        $this->address_deletion_patterns[] = $pattern;
+        $this->address_deletion_patterns[] = $address;
     }
 
     protected function logSchemaIssueOrRethrow($description, $pdo_exception)
@@ -150,7 +147,7 @@ class Database extends L2
     }
 
     // Returns an LCache\Entry
-    public function getEntry(Address $address)
+    public function getEntry(string $address)
     {
         $current = time();
 
@@ -159,7 +156,7 @@ class Database extends L2
               FROM ' . $this->prefixTable('lcache_events') .' e LEFT JOIN ' . $this->prefixTable('lcache_tags') . ' t ON t.event_id = e.event_id
               WHERE "address" = :address AND ("expiration" >= ' . $current . ' OR "expiration" IS NULL)
               GROUP BY e.event_id ORDER BY e.event_id DESC LIMIT 1');
-            $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
+            $sth->bindValue(':address', $address, \PDO::PARAM_STR);
             $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to search database for cache item', $e);
@@ -211,13 +208,13 @@ class Database extends L2
         return $event;
     }
 
-    public function exists(Address $address)
+    public function exists(string $address)
     {
         $current = time();
 
         try {
             $sth = $this->dbh->prepare('SELECT "event_id", ("value" IS NOT NULL) AS value_not_null, "value", "expiration" FROM ' . $this->prefixTable('lcache_events') .' WHERE "address" = :address AND ("expiration" >= ' . $current . ' OR "expiration" IS NULL) ORDER BY "event_id" DESC LIMIT 1');
-            $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
+            $sth->bindValue(':address', $address, \PDO::PARAM_STR);
             $sth->execute();
         } catch (\PDOException $e) {
             $this->logSchemaIssueOrRethrow('Failed to search database for cache item existence', $e);
@@ -253,7 +250,7 @@ class Database extends L2
         echo PHP_EOL;
     }
 
-    public function set($pool, Address $address, $value = null, $expiration = null, array $tags = [], $value_is_serialized = false)
+    public function set($pool, string $address, $value = null, $expiration = null, $value_is_serialized = false)
     {
         // Support pre-serialized values for testing purposes.
         if (!$value_is_serialized) {
@@ -263,7 +260,7 @@ class Database extends L2
         try {
             $sth = $this->dbh->prepare('INSERT INTO ' . $this->prefixTable('lcache_events') . ' ("pool", "address", "value", "created", "expiration") VALUES (:pool, :address, :value, ' . time() . ', :expiration)');
             $sth->bindValue(':pool', $pool, \PDO::PARAM_STR);
-            $sth->bindValue(':address', $address->serialize(), \PDO::PARAM_STR);
+            $sth->bindValue(':address', $address, \PDO::PARAM_STR);
             $sth->bindValue(':value', $value, \PDO::PARAM_LOB);
             $sth->bindValue(':expiration', $expiration, \PDO::PARAM_INT);
             $sth->execute();
@@ -273,92 +270,25 @@ class Database extends L2
         }
         $event_id = $this->dbh->lastInsertId();
 
-        // Handle bin and larger deletions immediately. Queue individual key
-        // deletions for shutdown.
-        if ($address->isEntireBin() || $address->isEntireCache()) {
-            $pattern = $address->serialize() . '%';
-            $sth = $this->dbh->prepare('DELETE FROM ' . $this->prefixTable('lcache_events') .' WHERE "event_id" < :new_event_id AND "address" LIKE :pattern');
+        if ($address == '*') {
+            $sth = $this->dbh->prepare('DELETE FROM ' . $this->prefixTable('lcache_events') .' WHERE "event_id" < :new_event_id');
             $sth->bindValue(':new_event_id', $event_id, \PDO::PARAM_INT);
-            $sth->bindValue(':pattern', $pattern, \PDO::PARAM_STR);
             $sth->execute();
+
         } else {
+
             if (is_null($this->event_id_low_water)) {
                 $this->event_id_low_water = $event_id;
             }
-            $this->queueDeletion($address);
         }
-
-        // Store any new cache tags.
-        // @TODO: Turn into one query.
-        foreach ($tags as $tag) {
-            try {
-                $sth = $this->dbh->prepare('INSERT INTO ' . $this->prefixTable('lcache_tags') . ' ("tag", "event_id") VALUES (:tag, :new_event_id)');
-                $sth->bindValue(':tag', $tag, \PDO::PARAM_STR);
-                $sth->bindValue(':new_event_id', $event_id, \PDO::PARAM_INT);
-                $sth->execute();
-            } catch (\PDOException $e) {
-                $this->logSchemaIssueOrRethrow('Failed to associate cache tags', $e);
-                return null;
-            }
-        }
-
+        $this->queueDeletion($address);
         return $event_id;
     }
 
-    public function delete($pool, Address $address)
+    public function delete($pool, string $address)
     {
         $event_id = $this->set($pool, $address);
         return $event_id;
-    }
-
-    public function getAddressesForTag($tag)
-    {
-        try {
-            // @TODO: Convert this to using a subquery to only match with the latest event_id.
-            $sth = $this->dbh->prepare('SELECT DISTINCT "address" FROM ' . $this->prefixTable('lcache_events') . ' e INNER JOIN ' . $this->prefixTable('lcache_tags') . ' t ON t.event_id = e.event_id WHERE "tag" = :tag');
-            $sth->bindValue(':tag', $tag, \PDO::PARAM_STR);
-            $sth->execute();
-        } catch (\PDOException $e) {
-            $this->logSchemaIssueOrRethrow('Failed to find cache items associated with tag', $e);
-            return null;
-        }
-        $addresses = [];
-        while ($tag_entry = $sth->fetchObject()) {
-            $address = new Address();
-            $address->unserialize($tag_entry->address);
-            $addresses[] = $address;
-        }
-        return $addresses;
-    }
-
-    public function deleteTag(L1 $l1, $tag)
-    {
-        // Find the matching keys and create tombstones for them.
-        try {
-            $sth = $this->dbh->prepare('SELECT DISTINCT "address" FROM ' . $this->prefixTable('lcache_events') . ' e INNER JOIN ' . $this->prefixTable('lcache_tags') . ' t ON t.event_id = e.event_id WHERE "tag" = :tag');
-            $sth->bindValue(':tag', $tag, \PDO::PARAM_STR);
-            $sth->execute();
-        } catch (\PDOException $e) {
-            $this->logSchemaIssueOrRethrow('Failed to find cache items associated with tag', $e);
-            return null;
-        }
-
-        $last_applied_event_id = null;
-        while ($tag_entry = $sth->fetchObject()) {
-            $address = new Address();
-            $address->unserialize($tag_entry->address);
-            $last_applied_event_id = $this->delete($l1->getPool(), $address);
-            $l1->delete($last_applied_event_id, $address);
-        }
-
-        // Delete the tag, which has now been invalidated.
-        // @TODO: Move to a transaction, collect the list of deleted keys,
-        // or delete individual tag/key pairs in the loop above.
-        //$sth = $this->dbh->prepare('DELETE FROM ' . $this->prefixTable('lcache_tags') . ' WHERE "tag" = :tag');
-        //$sth->bindValue(':tag', $tag, PDO::PARAM_STR);
-        //$sth->execute();
-
-        return $last_applied_event_id;
     }
 
     public function applyEvents(L1 $l1)
@@ -397,8 +327,7 @@ class Database extends L2
 
         //while ($event = $sth->fetchObject('LCacheEntry')) {
         while ($event = $sth->fetchObject()) {
-            $address = new Address();
-            $address->unserialize($event->address);
+            $address = $event->address;
             if (is_null($event->value)) {
                 $l1->delete($event->event_id, $address);
             } else {
@@ -408,8 +337,7 @@ class Database extends L2
                     $l1->delete($event->event_id, $address);
                 } else {
                     $event->value = $unserialized_value;
-                    $address = new Address();
-                    $address->unserialize($event->address);
+                    $address = $event->address;
                     $l1->setWithExpiration($event->event_id, $address, $event->value, $event->created, $event->expiration);
                 }
             }
