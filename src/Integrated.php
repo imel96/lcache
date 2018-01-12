@@ -10,7 +10,6 @@ final class Integrated
     protected $l1;
     protected $l2;
     protected $overhead_threshold;
-    protected $l1_cacheline;
 
     /**
      * @param L1 $l1
@@ -24,8 +23,12 @@ final class Integrated
         $this->overhead_threshold = $overhead_threshold;
     }
 
+    // mRq.get_msg()
     public function set(string $address, $value, $ttl_or_expiration = null)
     {
+        if (!$this->l1->isBusy($address)) {
+            $this->l1->set(0, $address, $value, $expiration);
+        }
         $expiration = null;
         $current = time();
 
@@ -63,29 +66,41 @@ final class Integrated
         }
 
         $event_id = $this->l2->set($this->l1->getPool(), $address, $value, $expiration);
+
         if (!is_null($event_id)) {
             $this->l1->set($event_id, $address, $value, $expiration);
         }
+        $this->l1->setBusy($address, false);
         return $event_id;
     }
 
+    // mRq.get_msg()
     protected function getEntryOrTombstone(string $address)
     {
+        if ($this->l1->isBusy($address)) {
+            return null;
+        }
+        if ($this->l1->getState($address) != 'I') {
+            // LoadHit
+            return $this->l1->getEntry($address);
+        }
+/*
         $entry = $this->l1->getEntry($address);
         if (!is_null($entry)) {
-            // LoadHit || StoreHit
             return $entry;
         }
+*/
         // L1Miss
         $this->l1->setBusy($address, true);
+        // p2c.get msg()
         $entry = $this->l2->getEntry($address);
         if (is_null($entry)) {
             // On an L2 miss, construct a negative cache entry that will be
             // overwritten on any update.
             $entry = new Entry(0, $this->l1->getPool(), $address, null, time(), null);
         }
-        // L2Resp
-        $this->l1->setBusy($address, false);
+        $this->l1->L2Response($address, false);
+
         $this->l1->setWithExpiration($entry->event_id, $address, $entry->value, $entry->created, $entry->expiration);
         return $entry;
     }

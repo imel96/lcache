@@ -8,8 +8,6 @@ use LCache\state\StateL1Interface;
 class StaticL1 extends L1
 {
     private static $cacheData = [];
-    public static $cacheLineBusy = [];
-
     protected $key_overhead;
 
     /** @var array Reference to the data array for the instance data pool. */
@@ -101,17 +99,5 @@ class StaticL1 extends L1
             unset($this->storage[$address]);
         }
         return true;
-    }
-
-    public function setBusy(string $address, bool $status) {
-        self::$cacheLineBusy[$address] = $status;
-    }
-
-    public function isBusy(string $address): bool {
-
-        if (!isset(self::$cacheLineBusy[$address])) {
-            self::$cacheLineBusy[$address] = false;
-        }
-        return self::$cacheLineBusy[$address];
     }
 }
