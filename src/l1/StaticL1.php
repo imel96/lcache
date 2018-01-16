@@ -8,7 +8,6 @@ use LCache\state\StateL1Interface;
 class StaticL1 extends L1
 {
     private static $cacheData = [];
-    protected $key_overhead;
 
     /** @var array Reference to the data array for the instance data pool. */
     protected $storage;
@@ -17,35 +16,15 @@ class StaticL1 extends L1
     {
         parent::__construct($pool, $state);
 
-        $this->key_overhead = [];
-
         if (!isset(self::$cacheData[$this->pool])) {
             self::$cacheData[$this->pool] = [];
         }
         $this->storage = &self::$cacheData[$this->pool];
     }
 
-    public function getKeyOverhead(string $address)
-    {
-        $local_key = $address;
-        if (array_key_exists($local_key, $this->key_overhead)) {
-            return $this->key_overhead[$local_key];
-        }
-        return 0;
-    }
-
     public function setWithExpiration($event_id, string $address, $value, $created, $expiration = null)
     {
         $local_key = $address;
-
-        // If not setting a negative cache entry, increment the key's overhead.
-        if (!is_null($value)) {
-            if (isset($this->key_overhead[$local_key])) {
-                $this->key_overhead[$local_key]++;
-            } else {
-                $this->key_overhead[$local_key] = 1;
-            }
-        }
 
         // Don't overwrite local entries that are even newer or the same age.
         if (isset($this->storage[$local_key]) && $this->storage[$local_key]->event_id >= $event_id) {
@@ -56,20 +35,8 @@ class StaticL1 extends L1
         return true;
     }
 
-    public function isNegativeCache(string $address): bool
-    {
-        return (isset($this->storage[$address]) && is_null($this->storage[$address]->value));
-    }
-
     public function getEntry(string $address)
     {
-        // Decrement the key's overhead.
-        if (isset($this->key_overhead[$address])) {
-            $this->key_overhead[$address]--;
-        } else {
-            $this->key_overhead[$address] = -1;
-        }
-
         if (!array_key_exists($address, $this->storage)) {
             $this->recordMiss();
             return null;
@@ -81,7 +48,7 @@ class StaticL1 extends L1
             $this->recordMiss();
             return null;
         }
-
+var_dump(self::$cacheLine);
         $this->recordHit();
 
         return $entry;

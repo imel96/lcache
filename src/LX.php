@@ -7,6 +7,10 @@ namespace LCache;
  */
 abstract class LX
 {
+    const STATE_INIT = 0;
+    const STATE_SHARED = 1;
+    const STATE_MODIFY = 2;
+
     abstract public function getEntry(string $address);
     abstract public function getHits();
     abstract public function getMisses();

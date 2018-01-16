@@ -13,7 +13,7 @@ abstract class L1 extends LX
     /** @var StateL1Interface */
     protected $state;
 
-    const INITIAL_STATE = ['busy' => false, 'state' => 'I'];
+    const INITIAL_STATE = ['busy' => false, 'state' => LX::STATE_INIT, 'rts' => 0, 'wts' => 0];
     /**
      * Constructor for all the L1 implementations.
      *
@@ -44,14 +44,11 @@ abstract class L1 extends LX
         return $this->pool;
     }
 
-    public function set($event_id, string $address, $value = null, $expiration = null)
+    public function set($event_id, int $state, string $address, $value = null, $expiration = null)
     {
         return $this->setWithExpiration($event_id, $address, $value, time(), $expiration);
     }
 
-    abstract public function isNegativeCache(string $address): bool;
-
-    abstract public function getKeyOverhead(string $address);
     abstract public function setWithExpiration($event_id, string $address, $value, $created, $expiration = null);
     abstract public function delete($event_id, string $address);
 
@@ -80,7 +77,9 @@ abstract class L1 extends LX
     }
 
     public function L2Response(string $address) {
-        static::$cacheLine[$address] = ['busy' => false, 'state' => 'S'];
+        static::$cacheLine[$address] = self::INITIAL_STATE;
+        static::$cacheLine[$address]['state'] = LX::STATE_SHARED;
+        static::$cacheLine[$address]['busy'] = false;
     }
 
     public function setBusy(string $address, bool $status) {

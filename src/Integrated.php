@@ -9,25 +9,19 @@ final class Integrated
 {
     protected $l1;
     protected $l2;
-    protected $overhead_threshold;
 
-    /**
-     * @param L1 $l1
-     * @param L2 $l2
-     * @param int $overhead_threshold
-     */
-    public function __construct(L1 $l1, L2 $l2, $overhead_threshold = null)
+    public function __construct(L1 $l1, L2 $l2)
     {
         $this->l1 = $l1;
         $this->l2 = $l2;
-        $this->overhead_threshold = $overhead_threshold;
     }
 
     // mRq.get_msg()
     public function set(string $address, $value, $ttl_or_expiration = null)
     {
         if (!$this->l1->isBusy($address)) {
-            $this->l1->set(0, $address, $value, $expiration);
+            $this->l1->get(0, LX::STATE_MODIFY, $address);
+            $this->l1->set(0, LX::STATE_MODIFY, $address, $value);
         }
         $expiration = null;
         $current = time();
@@ -39,49 +33,26 @@ final class Integrated
                 $expiration = $ttl_or_expiration;
             }
         }
-
-        if (!is_null($this->overhead_threshold)) {
-            $key_overhead = $this->l1->getKeyOverhead($address);
-
-            // Check if this key is known to have excessive overhead.
-            $excess = $key_overhead - $this->overhead_threshold;
-            if ($excess >= 0) {
-                // If there's already an L1 negative cache entry, simply skip the write.
-                if ($this->l1->isNegativeCache($address)) {
-                    return null;
-                }
-
-                // Otherwise, delete the item in L2.
-                $event_id = $this->l2->delete($this->l1->getPool(), $address);
-
-                // If the L2 deletion succeeded, retain a negative cache item
-                // in L1 for a number of minutes equivalent to the number of
-                // excessive sets over the threshold, plus one minute.
-                if (!is_null($event_id)) {
-                    $expiration = $current + ($excess + 1) * 60;
-                    $this->l1->setWithExpiration($event_id, $address, null, $current, $expiration);
-                }
-                return $event_id;
-            }
-        }
-
         $event_id = $this->l2->set($this->l1->getPool(), $address, $value, $expiration);
 
         if (!is_null($event_id)) {
-            $this->l1->set($event_id, $address, $value, $expiration);
+            $this->l1->get(LX::STATE_MODIFY, $address);
+            $this->l1->set($event_id, LX::STATE_MODIFY, $address, $value, $expiration);
         }
         $this->l1->setBusy($address, false);
         return $event_id;
     }
 
     // mRq.get_msg()
-    protected function getEntryOrTombstone(string $address)
+    public function getEntry(string $address)
     {
         if ($this->l1->isBusy($address)) {
             return null;
         }
-        if ($this->l1->getState($address) != 'I') {
+        if ($this->l1->getState($address) != LX::STATE_INIT) {
             // LoadHit
+            $this->l1->get(LX::STATE_MODIFY, $address);
+
             return $this->l1->getEntry($address);
         }
 /*
@@ -102,13 +73,8 @@ final class Integrated
         $this->l1->L2Response($address, false);
 
         $this->l1->setWithExpiration($entry->event_id, $address, $entry->value, $entry->created, $entry->expiration);
-        return $entry;
-    }
 
-    public function getEntry(string $address, $return_tombstone = false)
-    {
-        $entry = $this->getEntryOrTombstone($address);
-        if (!is_null($entry) && (!is_null($entry->value) || $return_tombstone)) {
+        if (!is_null($entry) && (!is_null($entry->value))) {
             return $entry;
         }
         return null;
