@@ -9,15 +9,13 @@ final class Entry
     public $created;
     public $event_id;
     public $expiration;
-    public $pool;
     public $rts;
     public $value;
     public $wts;
 
-    public function __construct($event_id, $pool, string $address, $value, $created, $expiration = null)
+    public function __construct($event_id, string $address, $value, $created, $expiration = null)
     {
         $this->event_id = $event_id;
-        $this->pool = $pool;
         $this->address = $address;
         $this->value = $value;
         $this->created = $created;

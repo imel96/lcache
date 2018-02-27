@@ -33,7 +33,7 @@ final class Integrated
                 $expiration = $ttl_or_expiration;
             }
         }
-        $event_id = $this->l2->set($this->l1->getPool(), $address, $value, $expiration);
+        $event_id = $this->l2->set($address, $value, $expiration);
 
         if (!is_null($event_id)) {
             $this->l1->get(LX::STATE_MODIFY, $address);
@@ -68,7 +68,7 @@ final class Integrated
         if (is_null($entry)) {
             // On an L2 miss, construct a negative cache entry that will be
             // overwritten on any update.
-            $entry = new Entry(0, $this->l1->getPool(), $address, null, time(), null);
+            $entry = new Entry(0, $address, null, time(), null);
         }
         $this->l1->L2Response($address, false);
 
@@ -100,7 +100,7 @@ final class Integrated
 
     public function delete(string $address)
     {
-        $event_id = $this->l2->delete($this->l1->getPool(), $address);
+        $event_id = $this->l2->delete($address);
 
         if (!is_null($event_id)) {
             $this->l1->delete($event_id, $address);

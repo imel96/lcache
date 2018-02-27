@@ -16,10 +16,10 @@ class StaticL1 extends L1
     {
         parent::__construct($pool, $state);
 
-        if (!isset(self::$cacheData[$this->pool])) {
-            self::$cacheData[$this->pool] = [];
+        if (!isset(self::$cacheData)) {
+            self::$cacheData = [];
         }
-        $this->storage = &self::$cacheData[$this->pool];
+        $this->storage = &self::$cacheData;
     }
 
     public function setWithExpiration($event_id, string $address, $value, $created, $expiration = null)
@@ -30,7 +30,7 @@ class StaticL1 extends L1
         if (isset($this->storage[$local_key]) && $this->storage[$local_key]->event_id >= $event_id) {
             return true;
         }
-        $this->storage[$local_key] = new Entry($event_id, $this->getPool(), $address, is_object($value) ? clone $value : $value, $created, $expiration);
+        $this->storage[$local_key] = new Entry($event_id, $address, is_object($value) ? clone $value : $value, $created, $expiration);
 
         return true;
     }
